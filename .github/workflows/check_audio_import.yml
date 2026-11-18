@@ -97,6 +97,7 @@ jobs:
       run: |
         cd tools/audio2shapenote
         $ENGINE_DIR/.venv/bin/python test_shapes.py
+        set -o pipefail
         $ENGINE_DIR/.venv/bin/python test_engine.py | tee engine.log
         echo "::notice title=engine tests::$(grep -E '^(melody|chorale):' engine.log | tr '\n' ' ')"
 

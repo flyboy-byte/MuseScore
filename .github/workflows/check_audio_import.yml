@@ -111,7 +111,9 @@ jobs:
         PY=$ENGINE_DIR/.venv/bin/python
         $PY ../tools/audio2shapenote/make_test_clip.py melody melody.wav
         $PY ../tools/audio2shapenote/make_test_clip.py chorale chorale.wav
-        export QT_QPA_PLATFORM=offscreen
+        # same as upstream vtests: without MU_QT_QPA_PLATFORM the app forces xcb (needs a display)
+        export QT_QPA_PLATFORM=offscreen MU_QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/runtime-runner
+        mkdir -p -m 700 $XDG_RUNTIME_DIR
         for f in melody chorale; do
           "$MSCORE" -o $f.mscx $f.wav
           "$MSCORE" -o $f.pdf  $f.wav

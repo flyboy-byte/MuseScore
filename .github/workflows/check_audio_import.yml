@@ -12,7 +12,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }} ${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # queue new pushes; never kill a running AppImage build
 
 jobs:
   audio_import:
@@ -114,13 +114,28 @@ jobs:
         # same as upstream vtests: without MU_QT_QPA_PLATFORM the app forces xcb (needs a display)
         export QT_QPA_PLATFORM=offscreen MU_QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/runtime-runner
         mkdir -p -m 700 $XDG_RUNTIME_DIR
+        # sanity: the engine on its own, exactly as the app calls it
+        $PY "$ENGINE_DIR/audio2shapenote.py" chorale.wav --output direct.musicxml --report direct.json --system aikin --quiet \
+          || echo "::error title=engine direct::engine failed on its own (exit $?)"
+        fail=0
         for f in melody chorale; do
-          "$MSCORE" -o $f.mscx $f.wav
-          "$MSCORE" -o $f.pdf  $f.wav
-          "$MSCORE" -o $f.png  $f.wav
+          for ext in mscx pdf png; do
+            if ! "$MSCORE" -o $f.$ext $f.wav > $f.$ext.log 2>&1; then
+              fail=1
+              msg=$(grep -iE "audio import|engine|python|error|failed|err:" $f.$ext.log | tail -15 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')
+              [ -n "$msg" ] || msg=$(tail -15 $f.$ext.log | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=mscore $f.$ext::$msg"
+            fi
+          done
+        done
+        LOGS=$(find ~/.local/share -path '*logs*' -name '*.log' 2>/dev/null | head -3)
+        for l in $LOGS; do
+          m=$(grep -iE "audio import|audioimport|iex_audio|failed load" "$l" | tail -10 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')
+          [ -z "$m" ] || echo "::warning title=app log $(basename $l)::$m"
         done
         ls -la
         echo "::notice title=convert::$(ls | tr '\n' ' ')"
+        exit $fail
 
     - name: Verify shape-note scores
       run: |

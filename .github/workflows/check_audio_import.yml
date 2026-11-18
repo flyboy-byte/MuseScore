@@ -1,0 +1,139 @@
+name: 'Check: Audio import (shape notes)'
+
+# Builds MuseScore, installs the bundled audio2shapenote engine the way a user
+# would, converts synthetic recordings with the real app (headless), checks the
+# result is a shape-note score, and runs the module's unit tests.
+
+on:
+  push:
+    branches: [ 'feature/audio-shape-note*' ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }} ${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audio_import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Configure workflow
+      run: |
+        bash ./buildscripts/ci/tools/make_build_number.sh
+        echo "BUILD_NUMBER=$(cat ./build.artifacts/env/build_number.env)" | tee -a $GITHUB_ENV
+
+    - name: Restore ccache files
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ${{runner.os}}-${{runner.arch}}-audioimport-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{runner.os}}-${{runner.arch}}-audioimport-ccache-
+          ${{runner.os}}-${{runner.arch}}-utests-ccache-
+
+    - name: Setup ccache
+      run: |
+        sudo apt-get install -y ccache
+        bash ./muse/buildscripts/ci/tools/setup_ccache_config.sh
+
+    - name: Free up disk space
+      run: |
+        sudo docker system prune -a -f
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: 6.11.2
+        host: 'linux'
+        target: 'desktop'
+        arch: 'linux_gcc_64'
+        modules: 'qt5compat qtnetworkauth qtshadertools qtwebsockets'
+        cache: true
+
+    - name: Setup environment
+      run: bash ./buildscripts/ci/linux/setup.sh
+
+    - name: Build app and unit tests
+      run: bash ./buildscripts/ci/linux/build_utest.sh -n ${{ env.BUILD_NUMBER }} --enable_code_coverage false
+
+    - name: Save ccache files
+      if: always()
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ${{runner.os}}-${{runner.arch}}-audioimport-ccache-${{ github.sha }}
+
+    - name: Run audio import unit tests
+      run: |
+        source $HOME/build_tools/environment.sh
+        cd build.debug
+        export QT_QPA_PLATFORM=minimal:enable_fonts ASAN_OPTIONS=detect_leaks=0:new_delete_type_mismatch=0
+        ctest -V -R audioimport
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install the bundled engine like a user would
+      run: |
+        ENGINE=$(find build.install -name audio2shapenote.py | head -1)
+        test -n "$ENGINE" || { echo "engine was not installed with the app"; exit 1; }
+        echo "ENGINE_DIR=$(dirname "$ENGINE")" | tee -a $GITHUB_ENV
+        python3 "$(dirname "$ENGINE")/setup_engine.py"
+
+    - name: Engine regression tests
+      run: |
+        cd tools/audio2shapenote
+        $ENGINE_DIR/.venv/bin/python test_shapes.py
+        $ENGINE_DIR/.venv/bin/python test_engine.py
+
+    - name: Convert recordings with MuseScore (headless)
+      run: |
+        source $HOME/build_tools/environment.sh
+        MSCORE=$(find build.install/bin -maxdepth 1 -type f -name 'mscore*' | head -1)
+        echo "app: $MSCORE"
+        mkdir -p audio_import_out && cd audio_import_out
+        PY=$ENGINE_DIR/.venv/bin/python
+        $PY ../tools/audio2shapenote/make_test_clip.py melody melody.wav
+        $PY ../tools/audio2shapenote/make_test_clip.py chorale chorale.wav
+        export QT_QPA_PLATFORM=offscreen
+        for f in melody chorale; do
+          ../$MSCORE -o $f.mscx $f.wav
+          ../$MSCORE -o $f.pdf  $f.wav
+          ../$MSCORE -o $f.png  $f.wav
+        done
+        ls -la
+
+    - name: Verify shape-note scores
+      run: |
+        cd audio_import_out
+        python3 - <<'EOF'
+        import re, sys
+        expect = {"melody": (1, 12), "chorale": (4, 32)}
+        ok = True
+        for name, (staves, notes) in expect.items():
+            x = open(f"{name}.mscx", encoding="utf-8").read()
+            n_staff = len(re.findall(r"<Part[ >]", x))
+            n_notes = len(re.findall(r"<Note[ >]", x))
+            schemes = re.findall(r"<noteheadScheme>([^<]+)</noteheadScheme>", x)
+            print(f"{name}: parts={n_staff} notes={n_notes} schemes={sorted(set(schemes))}")
+            ok &= n_staff == staves and n_notes == notes and set(schemes) == {"shape-7-aikin"} and len(schemes) >= staves
+        sys.exit(0 if ok else 1)
+        EOF
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: audio_import_results
+        path: |
+          audio_import_out/
+          build.debug/**/test-results*.xml

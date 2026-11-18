@@ -2,9 +2,9 @@
 <!DOCTYPE score-partwise  PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
 <score-partwise version="4.0">
   <work>
-    <work-title>test_melody</work-title>
+    <work-title>melody</work-title>
   </work>
-  <movement-title>test_melody</movement-title>
+  <movement-title>melody</movement-title>
   <identification>
     <creator type="composer">Music21</creator>
     <encoding>
@@ -22,12 +22,21 @@
     </scaling>
   </defaults>
   <part-list>
-    <score-part id="P7d0f6c574d286035423996df89d2c803">
-      <part-name />
+    <score-part id="P2e7150e46ccf290c8b5d6ee7800255f5">
+      <part-name>Melody</part-name>
+      <part-abbreviation>M</part-abbreviation>
+      <score-instrument id="Ieba406cc0b5d10c821303a930c5d86b4">
+        <instrument-name>Melody</instrument-name>
+        <instrument-abbreviation>V</instrument-abbreviation>
+      </score-instrument>
+      <midi-instrument id="Ieba406cc0b5d10c821303a930c5d86b4">
+        <midi-channel>1</midi-channel>
+        <midi-program>54</midi-program>
+      </midi-instrument>
     </score-part>
   </part-list>
   <!--=========================== Part 1 ===========================-->
-  <part id="P7d0f6c574d286035423996df89d2c803">
+  <part id="P2e7150e46ccf290c8b5d6ee7800255f5">
     <!--========================= Measure 1 ==========================-->
     <measure implicit="no" number="1">
       <attributes>

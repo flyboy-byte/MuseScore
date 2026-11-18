@@ -212,6 +212,9 @@
 #ifdef MUE_BUILD_IMPEXP_AUDIOEXPORT_MODULE
 #include "importexport/audioexport/audioexportmodule.h"
 #endif
+#ifdef MUE_BUILD_IMPEXP_AUDIOIMPORT_MODULE
+#include "importexport/audioimport/audioimportmodule.h"
+#endif
 #ifdef MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE
 #include "importexport/imagesexport/imagesexportmodule.h"
 #endif
@@ -406,6 +409,9 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const std::shared_ptr<
 #ifdef MUE_BUILD_IMPEXP_AUDIOEXPORT_MODULE
     app->addModule(new mu::iex::audioexport::AudioExportModule());
 #endif
+#ifdef MUE_BUILD_IMPEXP_AUDIOIMPORT_MODULE
+    app->addModule(new mu::iex::audioimport::AudioImportModule());
+#endif
 #ifdef MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE
     app->addModule(new mu::iex::imagesexport::ImagesExportModule());
 #endif
@@ -529,6 +535,9 @@ static void addConsoleModules(std::shared_ptr<MuseScoreConsoleApp> app)
     app->addModule(new mu::iex::ove::OveModule());
 #ifdef MUE_BUILD_IMPEXP_AUDIOEXPORT_MODULE
     app->addModule(new mu::iex::audioexport::AudioExportModule());
+#endif
+#ifdef MUE_BUILD_IMPEXP_AUDIOIMPORT_MODULE
+    app->addModule(new mu::iex::audioimport::AudioImportModule());
 #endif
 #ifdef MUE_BUILD_IMPEXP_IMAGESEXPORT_MODULE
     app->addModule(new mu::iex::imagesexport::ImagesExportModule());

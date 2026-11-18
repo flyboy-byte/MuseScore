@@ -1,7 +1,7 @@
-# Basic Pitch is installed with --no-deps (its pins need TensorFlow/old numpy); ONNX runtime is used instead.
-#   pip install --no-deps basic-pitch
-music21
-librosa
+# basic-pitch itself is installed with --no-deps by setup_engine.py
+# (its pins need TensorFlow and an old numpy); the bundled ONNX model is used instead.
+music21>=9
+librosa>=0.10
 soundfile
 numpy
 scipy

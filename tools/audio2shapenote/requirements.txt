@@ -1,0 +1,11 @@
+# Basic Pitch is installed with --no-deps (its pins need TensorFlow/old numpy); ONNX runtime is used instead.
+#   pip install --no-deps basic-pitch
+music21
+librosa
+soundfile
+numpy
+scipy
+resampy
+mir_eval
+pretty_midi
+onnxruntime

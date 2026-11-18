@@ -78,10 +78,13 @@ std::string NotationAudioReader::resolvePython(const io::path_t& enginePath) con
         return env.toStdString();
     }
 
-    // A virtual environment created by setup_engine.py: next to the engine,
-    // or in the user's data folder when the app folder is read-only.
+    // A virtual environment created by setup_engine.py: next to the engine, or
+    // (`setup_engine.py --user`, needed for read-only installs such as AppImage)
+    // in the per-user generic data folder: ~/.local/share, %LOCALAPPDATA%,
+    // ~/Library/Application Support.
     const QStringList venvDirs {
         QFileInfo(enginePath.toQString()).absolutePath() + "/.venv",
+        QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/audio2shapenote/.venv",
         globalConfiguration()->userAppDataPath().toQString() + "/audio2shapenote/.venv",
     };
     for (const QString& dir : venvDirs) {

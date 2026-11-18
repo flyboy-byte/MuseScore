@@ -3,11 +3,11 @@
 """Create the Python environment MuseScore's audio import uses.
 
     python3 setup_engine.py            # .venv next to this script
-    python3 setup_engine.py --user     # .venv in the MuseScore user data folder
-                                       # (use this when the app folder is read-only)
+    python3 setup_engine.py --user     # .venv in ~/.local/share/audio2shapenote (Linux),
+                                       # %LOCALAPPDATA%\\audio2shapenote, ~/Library/Application Support/audio2shapenote;
+                                       # use this for read-only installs such as the AppImage
 
-MuseScore looks for <engine folder>/.venv and <user data>/audio2shapenote/.venv
-automatically; no settings change is needed afterwards.
+MuseScore looks in both places automatically; no settings change is needed afterwards.
 """
 import argparse
 import os
@@ -21,15 +21,16 @@ HERE = Path(__file__).resolve().parent
 
 
 def user_data_dir():
+    """Same folder MuseScore checks: QStandardPaths::GenericDataLocation/audio2shapenote."""
     home = Path.home()
     system = platform.system()
     if system == "Windows":
         base = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
-        return base / "MuseScore" / "MuseScore5" / "audio2shapenote"
-    if system == "Darwin":
-        return home / "Library" / "Application Support" / "MuseScore" / "MuseScore5" / "audio2shapenote"
-    base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    return base / "MuseScore" / "MuseScore5" / "audio2shapenote"
+    elif system == "Darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    return base / "audio2shapenote"
 
 
 def main():

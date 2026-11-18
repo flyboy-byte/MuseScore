@@ -147,3 +147,96 @@ jobs:
         path: |
           audio_import_out/
           build.debug/**/test-results*.xml
+
+  # Downloadable Linux app (AppImage) with audio import built in.
+  appimage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Configure workflow
+      run: |
+        bash ./buildscripts/ci/tools/make_build_mode_env.sh -e ${{ github.event_name }} -m devel
+        bash ./buildscripts/ci/tools/make_build_number.sh
+        echo "BUILD_NUMBER=$(cat ./build.artifacts/env/build_number.env)" | tee -a $GITHUB_ENV
+        echo "BUILD_MODE=$(cat ./build.artifacts/env/build_mode.env)" | tee -a $GITHUB_ENV
+
+    - name: Restore ccache files
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ${{runner.os}}-${{runner.arch}}-audioimport-appimage-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{runner.os}}-${{runner.arch}}-audioimport-appimage-ccache-
+          ${{runner.os}}-${{runner.arch}}-ccache-
+
+    - name: Setup ccache
+      run: |
+        sudo apt-get install -y ccache
+        bash ./muse/buildscripts/ci/tools/setup_ccache_config.sh
+
+    - name: Free up disk space
+      run: |
+        sudo docker system prune -a -f
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: 6.11.2
+        host: 'linux'
+        target: 'desktop'
+        arch: 'linux_gcc_64'
+        modules: 'qt5compat qtnetworkauth qtshadertools qtwebsockets'
+        cache: true
+
+    - name: Setup environment
+      run: bash ./buildscripts/ci/linux/setup.sh --arch x86_64 --build-pipewire
+
+    - name: Build
+      run: bash ./buildscripts/ci/linux/build.sh -n "${BUILD_NUMBER}" --arch x86_64 --build-pipewire
+
+    - name: Save ccache files
+      if: always()
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ${{runner.os}}-${{runner.arch}}-audioimport-appimage-ccache-${{ github.sha }}
+
+    - name: Package AppImage
+      run: bash ./buildscripts/ci/linux/package.sh --arch x86_64 --build-pipewire
+
+    - name: Add engine setup files and instructions
+      run: |
+        APPIMAGE=$(find build.artifacts -name '*.AppImage' | head -1)
+        test -n "$APPIMAGE" || { echo "no AppImage produced"; exit 1; }
+        mkdir -p dist/audio2shapenote
+        cp "$APPIMAGE" dist/
+        cp tools/audio2shapenote/{audio2shapenote.py,setup_engine.py,requirements.txt,README.md,make_test_clip.py} dist/audio2shapenote/
+        cat > dist/HOW_TO_RUN.txt <<'TXT'
+        MuseScore with audio-to-shape-note import (Linux, x86_64)
+
+        1. One-time engine setup (needs Python 3.10+):
+             python3 audio2shapenote/setup_engine.py --user
+        2. Make the app runnable and start it:
+             chmod +x MuseScore*.AppImage
+             ./MuseScore*.AppImage
+        3. File > Open a recording (.wav .mp3 .flac .ogg .m4a .aif).
+           It opens as shape-note sheet music (7-shape Aikin by default).
+           Options: Preferences > Advanced, search "audioImport".
+
+        Command line:  ./MuseScore*.AppImage -o song.mscz song.wav
+        Test clip:     python3 audio2shapenote/make_test_clip.py chorale chorale.wav
+        TXT
+        sed -i 's/^        //' dist/HOW_TO_RUN.txt
+        echo "::notice title=appimage::$(basename "$APPIMAGE") ($(du -h "$APPIMAGE" | cut -f1))"
+
+    - name: Upload AppImage
+      uses: actions/upload-artifact@v7
+      with:
+        name: MuseScore_audio_import_Linux_x86_64
+        path: dist/

@@ -76,9 +76,10 @@ jobs:
         source $HOME/build_tools/environment.sh
         cd build.debug
         export QT_QPA_PLATFORM=minimal:enable_fonts ASAN_OPTIONS=detect_leaks=0:new_delete_type_mismatch=0
-        ctest -V -R audioimport
+        ctest -V -R audioimport --no-tests=error
+        echo "::notice title=unit tests::audioimport unit tests passed"
 
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
@@ -86,31 +87,37 @@ jobs:
       run: |
         ENGINE=$(find build.install -name audio2shapenote.py | head -1)
         test -n "$ENGINE" || { echo "engine was not installed with the app"; exit 1; }
-        echo "ENGINE_DIR=$(dirname "$ENGINE")" | tee -a $GITHUB_ENV
-        python3 "$(dirname "$ENGINE")/setup_engine.py"
+        ENGINE_DIR=$(cd "$(dirname "$ENGINE")" && pwd)
+        echo "ENGINE_DIR=$ENGINE_DIR" | tee -a $GITHUB_ENV
+        python3 "$ENGINE_DIR/setup_engine.py"
+        test -x "$ENGINE_DIR/.venv/bin/python"
+        echo "::notice title=engine::bundled engine installed at $ENGINE_DIR"
 
     - name: Engine regression tests
       run: |
         cd tools/audio2shapenote
         $ENGINE_DIR/.venv/bin/python test_shapes.py
-        $ENGINE_DIR/.venv/bin/python test_engine.py
+        $ENGINE_DIR/.venv/bin/python test_engine.py | tee engine.log
+        echo "::notice title=engine tests::$(grep -E '^(melody|chorale):' engine.log | tr '\n' ' ')"
 
     - name: Convert recordings with MuseScore (headless)
       run: |
         source $HOME/build_tools/environment.sh
-        MSCORE=$(find build.install/bin -maxdepth 1 -type f -name 'mscore*' | head -1)
+        MSCORE=$(realpath "$(find build.install/bin -maxdepth 1 -type f -name 'mscore*' | head -1)")
         echo "app: $MSCORE"
+        test -x "$MSCORE"
         mkdir -p audio_import_out && cd audio_import_out
         PY=$ENGINE_DIR/.venv/bin/python
         $PY ../tools/audio2shapenote/make_test_clip.py melody melody.wav
         $PY ../tools/audio2shapenote/make_test_clip.py chorale chorale.wav
         export QT_QPA_PLATFORM=offscreen
         for f in melody chorale; do
-          ../$MSCORE -o $f.mscx $f.wav
-          ../$MSCORE -o $f.pdf  $f.wav
-          ../$MSCORE -o $f.png  $f.wav
+          "$MSCORE" -o $f.mscx $f.wav
+          "$MSCORE" -o $f.pdf  $f.wav
+          "$MSCORE" -o $f.png  $f.wav
         done
         ls -la
+        echo "::notice title=convert::$(ls | tr '\n' ' ')"
 
     - name: Verify shape-note scores
       run: |
@@ -124,7 +131,9 @@ jobs:
             n_staff = len(re.findall(r"<Part[ >]", x))
             n_notes = len(re.findall(r"<Note[ >]", x))
             schemes = re.findall(r"<noteheadScheme>([^<]+)</noteheadScheme>", x)
-            print(f"{name}: parts={n_staff} notes={n_notes} schemes={sorted(set(schemes))}")
+            msg = f"{name}: parts={n_staff} notes={n_notes} schemes={sorted(set(schemes))}"
+            print(msg)
+            print(f"::notice title=verify {name}::{msg}")
             ok &= n_staff == staves and n_notes == notes and set(schemes) == {"shape-7-aikin"} and len(schemes) >= staves
         sys.exit(0 if ok else 1)
         EOF

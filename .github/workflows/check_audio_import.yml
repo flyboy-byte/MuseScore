@@ -125,6 +125,11 @@ jobs:
               msg=$(grep -iE "audio import|engine|python|error|failed|err:" $f.$ext.log | tail -15 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')
               [ -n "$msg" ] || msg=$(tail -15 $f.$ext.log | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')
               echo "::error title=mscore $f.$ext::$msg"
+              if grep -q AddressSanitizer $f.$ext.log; then
+                asan=$(sed -n '/ERROR: AddressSanitizer/,$p' $f.$ext.log | grep -E 'AddressSanitizer|^ *#[0-9]+ |freed by|previously allocated|is located' \
+                       | grep -vE 'libasan|libc\.so|libstdc' | head -45 | cut -c1-220 | sed ':a;N;$!ba;s/\n/%0A/g')
+                echo "::error title=asan $f.$ext::$asan"
+              fi
             fi
           done
         done
@@ -252,7 +257,46 @@ jobs:
         sed -i 's/^        //' dist/HOW_TO_RUN.txt
         echo "::notice title=appimage::$(basename "$APPIMAGE") ($(du -h "$APPIMAGE" | cut -f1))"
 
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - name: Test the AppImage like a user
+      run: |
+        set -o pipefail
+        sudo apt-get install -y libfuse2t64 || true
+        python3 dist/audio2shapenote/setup_engine.py --user
+        APP=$(realpath dist/*.AppImage); chmod +x "$APP"
+        mkdir -p appimage_test && cd appimage_test
+        PY=$HOME/.local/share/audio2shapenote/.venv/bin/python
+        $PY ../tools/audio2shapenote/make_test_clip.py chorale chorale.wav
+        $PY ../tools/audio2shapenote/make_test_clip.py melody melody.wav
+        export QT_QPA_PLATFORM=offscreen MU_QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/runtime-runner APPIMAGE_EXTRACT_AND_RUN=1
+        mkdir -p -m 700 $XDG_RUNTIME_DIR
+        fail=0
+        for f in melody chorale; do
+          for ext in mscx pdf; do
+            if ! "$APP" -o $f.$ext $f.wav > $f.$ext.log 2>&1; then
+              fail=1
+              m=$(grep -iE "audio import|error|fatal|failed" $f.$ext.log | tail -12 | cut -c1-250 | sed ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=appimage $f.$ext::$m"
+            fi
+          done
+        done
+        python3 - <<'PYEOF' || fail=1
+        import re
+        for name, (parts, notes) in {"melody": (1, 12), "chorale": (4, 32)}.items():
+            x = open(f"{name}.mscx", encoding="utf-8").read()
+            p = len(re.findall(r"<Part[ >]", x)); n = len(re.findall(r"<Note[ >]", x))
+            sch = sorted(set(re.findall(r"<noteheadScheme>([^<]+)</noteheadScheme>", x)))
+            print(f"::notice title=appimage verify {name}::parts={p} notes={n} schemes={sch}")
+            assert p == parts and n == notes and sch == ["shape-7-aikin"], name
+        PYEOF
+        cp -r ../appimage_test ../dist/sample_output
+        exit $fail
+
     - name: Upload AppImage
+      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: MuseScore_audio_import_Linux_x86_64

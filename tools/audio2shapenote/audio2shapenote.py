@@ -22,7 +22,9 @@ Exit codes: 0 ok, 2 bad arguments, 3 no notes found, 4 missing dependency, 5 oth
 import argparse
 import itertools
 import json
+import math
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -247,13 +249,16 @@ def quantise(events, bpm, grid, t0, follow=0.25):
     t_prev, q_prev = t0, 0
     unit_at = {}
     for t in starts:
-        raw = q_prev + (t - t_prev) / unit
-        q = max(q_prev + (1 if t > t_prev + 0.5 * unit else 0), int(round(raw)))
-        span = q - q_prev
-        if span > 0:
-            err = raw - q
-            unit *= 1 + follow * err / span
-            unit = min(max(unit, unit0 * 0.8), unit0 * 1.25)
+        if follow:
+            raw = q_prev + (t - t_prev) / unit
+            q = max(q_prev + (1 if t > t_prev + 0.5 * unit else 0), int(round(raw)))
+            span = q - q_prev
+            if span > 0:
+                err = raw - q
+                unit *= 1 + follow * err / span
+                unit = min(max(unit, unit0 * 0.8), unit0 * 1.25)
+        else:
+            q = max(0, round((t - t0) / unit0))
         pos_of[t] = q
         unit_at[t] = unit
         t_prev, q_prev = t, q
@@ -408,13 +413,16 @@ def estimate_meter(voices, grid):
 
 # ----------------------------------------------------------------------------- spelling, shapes
 
-def spell(midi, sharps):
+def spell(midi, key_signature):
     from music21 import pitch
+
     p = pitch.Pitch(midi=midi)
-    if sharps < 0 and p.accidental is not None and p.accidental.alter > 0:
-        p = p.getEnharmonic()
-    elif sharps > 0 and p.accidental is not None and p.accidental.alter < 0:
-        p = p.getEnharmonic()
+    for candidate in (p, *p.getAllCommonEnharmonics(alterLimit=1)):
+        expected = key_signature.accidentalByStep(candidate.step)
+        if (candidate.accidental.alter if candidate.accidental else 0) == (expected.alter if expected else 0):
+            return candidate
+    # Preserve the default spelling for chromatic pitches until harmonic context
+    # can distinguish forms such as a raised seventh from a lowered tonic.
     return p
 
 
@@ -442,6 +450,10 @@ def build_score(voices, voice_set, bpm, beats, pickup, grid, sharps, system, tit
     score = stream.Score()
     score.metadata = metadata.Metadata(title=title)
     report = []
+    key_signature = m21key.KeySignature(sharps)
+    bar = beats * grid
+    end = max((su + du for voice in voices for su, du, _ in voice), default=0) + shift
+    total = max(bar, -(-end // bar) * bar)
 
     for vi, ((name, _, clef_name), vnotes) in enumerate(zip(voice_set, voices)):
         part = stream.Part(id=f"P{vi + 1}")
@@ -456,7 +468,7 @@ def build_score(voices, voice_set, bpm, beats, pickup, grid, sharps, system, tit
         if vi == 0:
             part.insert(0, tempo.MetronomeMark(number=bpm))
         for su, du, midi in vnotes:
-            p = spell(midi, sharps)
+            p = spell(midi, key_signature)
             n = note.Note(p)
             n.quarterLength = du / grid
             syl = sylls[shape_degree(p, sharps)]
@@ -464,24 +476,28 @@ def build_score(voices, voice_set, bpm, beats, pickup, grid, sharps, system, tit
             part.insert((su + shift) / grid, n)
             report.append({"voice": name, "beat": su / grid, "pitch": p.nameWithOctave,
                            "beats": du / grid, "shape": syl})
-        end = max((su + du for su, du, _ in vnotes), default=0) + shift
-        bar = beats * grid
-        total = max(bar, -(-end // bar) * bar)  # pad last bar
         part.makeRests(fillGaps=True, inPlace=True, timeRangeFromBarDuration=False,
                        refStreamOrTimeRange=[0, total / grid])
         part.makeNotation(inPlace=True)
         if shift:
-            first = part.getElementsByClass(stream.Measure).first()
-            if first is not None:
-                lead = first.notesAndRests.first()
-                if lead is not None and lead.isRest and lead.offset == 0 and lead.quarterLength == shift / grid:
-                    first.remove(lead)
-                    first.paddingLeft = shift / grid
-                    for el in list(first.elements):
-                        if el.offset >= shift / grid:
-                            first.setElementOffset(el, el.offset - shift / grid)
-                    for i, m in enumerate(part.getElementsByClass(stream.Measure)):
-                        m.number = i  # pickup is bar 0
+            measures = part.getElementsByClass(stream.Measure)
+            first = measures.first()
+            padding = shift / grid
+            for event in list(first.notesAndRests):
+                onset = event.offset
+                if onset >= padding:
+                    first.setElementOffset(event, onset - padding)
+                elif onset + event.quarterLength > padding:
+                    event.quarterLength -= padding - onset
+                    first.setElementOffset(event, 0)
+                else:
+                    first.remove(event)
+            first.paddingLeft = padding
+            first.showNumber = stream.enums.ShowNumber.NEVER
+            for i, measure in enumerate(measures):
+                measure.number = i
+                if i:
+                    part.setElementOffset(measure, measure.offset - padding)
         score.insert(0, part)
     return score, report
 
@@ -493,6 +509,11 @@ class MissingDependency(Exception):
 
 
 def run(a):
+    with tempfile.TemporaryDirectory(prefix="a2s_") as temp_dir:
+        return transcribe_score(a, Path(temp_dir))
+
+
+def transcribe_score(a, temp_dir):
     audio = Path(a.audio)
     if not audio.exists():
         raise FileNotFoundError(audio)
@@ -502,7 +523,6 @@ def run(a):
     separated = False
     if a.separate != "off":
         try:
-            import tempfile
             import soundfile as sf
             from separate import separate_vocals
             voc, sr = separate_vocals(audio)
@@ -514,8 +534,7 @@ def run(a):
             # ~1 (>0.98): already a cappella (keep the original, no artifacts);
             # very low: the model did not hear human voices (keep the original too)
             if a.separate == "on" or 0.3 <= ratio <= 0.98:
-                tmpdir = tempfile.mkdtemp(prefix="a2s_")
-                source = Path(tmpdir) / "vocals.wav"
+                source = temp_dir / "vocals.wav"
                 sf.write(str(source), voc.T, sr)
                 separated = True
             else:
@@ -543,31 +562,27 @@ def run(a):
     ev.sort()
     t0 = ev[0][0]
     bpm = a.bpm or estimate_bpm(source, ev, a.grid)
-    q = quantise(ev, bpm, a.grid, t0)
+    q = quantise(ev, bpm, a.grid, t0, follow=0 if a.bpm is not None else 0.25)
     n_voices = auto_voice_count(q) if voices_req == 0 else voices_req
     voice_set = sets[n_voices]
     voices = assign_voices(q, n_voices, voice_set, legato=a.grid * a.legato)
 
     weights = [(p, du / a.grid) for v in voices for _, du, p in v]
-    key_obj = pick_key(weights)
-    sharps = key_obj.sharps if a.key is None else a.key
+    key_obj = pick_key(weights) if a.key is None else None
+    sharps = key_obj.sharps if key_obj is not None else a.key
 
     if a.time_sig == "auto":
         beats, pickup = estimate_meter(voices, a.grid)
     else:
-        beats, pickup = int(a.time_sig.split("/")[0]), a.pickup * a.grid
+        beats, pickup = int(a.time_sig.split("/")[0]), round(a.pickup * a.grid)
 
     score, report = build_score(voices, voice_set, bpm, beats, pickup, a.grid,
                                 sharps, a.system, a.title or audio.stem)
     score.write("musicxml", fp=str(out))
-    if pickup:
-        # mark the pickup bar as implicit so notation programs do not count it
-        xml = out.read_text(encoding="utf-8")
-        out.write_text(xml.replace('<measure implicit="no" number="0"', '<measure implicit="yes" number="0"'),
-                       encoding="utf-8")
     summary = {
         "output": str(out), "events": len(ev), "voices": [name for name, *_ in voice_set],
-        "bpm": bpm, "key": f"{key_obj.tonic.name} {key_obj.mode}", "sharps": sharps,
+        "bpm": bpm, "key": f"{key_obj.tonic.name} {key_obj.mode}" if a.key is None else None,
+        "sharps": sharps,
         "time_signature": f"{beats}/4", "pickup_beats": pickup / a.grid, "system": a.system,
         "ensemble": ensemble, "separated": separated,
         "notes": report,
@@ -599,7 +614,30 @@ def parse_args(argv):
     ap.add_argument("--title")
     ap.add_argument("--report", help="write a JSON summary here")
     ap.add_argument("-q", "--quiet", action="store_true")
-    return ap.parse_args(argv)
+    a = ap.parse_args(argv)
+    if a.bpm is not None and a.bpm <= 0:
+        ap.error("--bpm must be positive")
+    if a.key is not None and not -7 <= a.key <= 7:
+        ap.error("--key must be between -7 and 7")
+    beats = None
+    if a.time_sig != "auto":
+        numerator, _, denominator = a.time_sig.partition("/")
+        if not numerator.isascii() or not numerator.isdecimal() or denominator != "4":
+            ap.error("--time-sig must be auto or a positive N/4")
+        beats = int(numerator)
+        if beats <= 0:
+            ap.error("--time-sig must be auto or a positive N/4")
+    if not math.isfinite(a.pickup) or a.pickup < 0:
+        ap.error("--pickup must be a finite, nonnegative number")
+    if a.pickup and (beats is None or a.pickup >= beats):
+        ap.error("--pickup requires a fixed time signature and must be shorter than one measure")
+    if not math.isclose(a.pickup * a.grid, round(a.pickup * a.grid), abs_tol=1e-9):
+        ap.error("--pickup must align with --grid")
+    if any(not 0 <= value <= 1 for value in (a.onset, a.frame)):
+        ap.error("--onset and --frame must be between 0 and 1")
+    if any(not math.isfinite(value) or value < 0 for value in (a.legato, a.min_ms)):
+        ap.error("--legato and --min-ms must be finite and nonnegative")
+    return a
 
 
 def main(argv=None):
@@ -619,7 +657,8 @@ def main(argv=None):
     if a.report:
         Path(a.report).write_text(json.dumps(summary, indent=2))
     if not a.quiet:
-        print(f"voices={summary['voices']} bpm={summary['bpm']} key={summary['key']} "
+        key_label = summary["key"] or f"{summary['sharps']} fifths"
+        print(f"voices={summary['voices']} bpm={summary['bpm']} key={key_label} "
               f"time={summary['time_signature']} pickup={summary['pickup_beats']} system={a.system}")
         for n in summary["notes"]:
             print(f"  {n['voice']:7s} beat {n['beat']:6.2f}  {n['pitch']:4s} {n['beats']:4.2f}  {n['shape']}")

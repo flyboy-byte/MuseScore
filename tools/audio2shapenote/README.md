@@ -96,6 +96,41 @@ simultaneous-overtone removal, range limits, legato fill and vocal isolation. Ex
 recordings (big rooms, many singers per part, octave doubling of treble and
 tenor) to land between the last two rows and need hand correction.
 
+### Reference score check on a real choir
+
+For a reproducible check, use the 69-second *Tebe Poem* full-choir mix and the
+published MEI score.
+[Recording](https://helenacuesta.github.io/MultipleF0EstimationVocalEnsembles/files/orig/DCS_TP_FullChoir_Take03_mix.wav)
+· [Reference score and recording notes](https://www.audiolabs-erlangen.de/resources/MIR/2020-DagstuhlChoirSet/data/DCS_TP_FullChoir_Take03)
+
+```sh
+.venv/bin/python audio2shapenote.py DCS_TP_FullChoir_Take03_mix.wav \
+  --voices 4 --ensemble mixed --separate off --report original.json -o original.musicxml
+```
+
+Repeat with `--separate on` for the isolated mix. For the guided pass, retain
+`--separate off` and add `--time-sig 4/4 --pickup 1 --key -2 --bpm 78 --legato 0`.
+The guided tempo is an approximate average for this performance.
+
+| Pass | Score measures | Notes emitted | Reference pitches matched in order |
+|---|---:|---:|---:|
+| Published score | 23 | 231 | 231 |
+| Original mix, rhythm estimated | 43 | 431 | 177 |
+| Isolated vocals, rhythm estimated | 28 | 374 | 163 |
+| Original mix, rhythm guided | 24 | 385 | 144 |
+
+The last column compares MIDI pitch sequences independently per staff using
+longest common subsequence, including written repeated notes. It ignores timing
+and can match a pitch in the wrong measure, so it is an upper bound on exact
+score agreement under this alignment. The two estimated passes found 4/4 and
+two flats but guessed a three-beat pickup where the score has one.
+
+For real recordings, review the draft alongside the audio. Start with a solo
+recording or isolated part tracks when available. If a score already exists,
+use it for pitches, part assignments, and notation, and align it to the audio.
+For mixed choir recordings with no reference, check entrances, unisons,
+inner-voice assignments, and bar lines before relying on the shape-note draft.
+
 ## Known limits
 
 - Four parts at most; parts are assigned by range and voice leading, so crossing

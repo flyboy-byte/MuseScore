@@ -251,9 +251,11 @@ jobs:
         cat > dist/HOW_TO_RUN.txt <<'TXT'
         MuseScore with audio-to-shape-note import (Linux, x86_64)
 
-        1. One-time engine setup (needs Python 3.10+):
+        1. Install the engine (needs Python 3.10+):
              python3 audio2shapenote/setup_engine.py --user
-        2. Make the app runnable and start it:
+           Updating a previous install? Run:
+             python3 audio2shapenote/setup_engine.py --user --upgrade
+        2. Make the new AppImage runnable and start it:
              chmod +x MuseScore*.AppImage
              ./MuseScore*.AppImage
         3. File > Open a recording (.wav .mp3 .flac .ogg .m4a .aif).
@@ -261,7 +263,7 @@ jobs:
            Options: Preferences > Advanced, search "audioImport".
 
         Command line:  ./MuseScore*.AppImage -o song.mscz song.wav
-        Test clip:     python3 audio2shapenote/make_test_clip.py chorale chorale.wav
+        Test clip:     ~/.local/share/audio2shapenote/.venv/bin/python audio2shapenote/make_test_clip.py chorale chorale.wav
         TXT
         sed -i 's/^        //' dist/HOW_TO_RUN.txt
         echo "::notice title=appimage::$(basename "$APPIMAGE") ($(du -h "$APPIMAGE" | cut -f1))"
@@ -275,6 +277,7 @@ jobs:
         set -o pipefail
         sudo apt-get install -y libfuse2t64 || true
         python3 dist/audio2shapenote/setup_engine.py --user
+        python3 dist/audio2shapenote/setup_engine.py --user --upgrade
         APP=$(realpath dist/*.AppImage); chmod +x "$APP"
         mkdir -p appimage_test && cd appimage_test
         PY=$HOME/.local/share/audio2shapenote/.venv/bin/python

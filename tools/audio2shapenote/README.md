@@ -9,7 +9,7 @@ sheet music**. It is used two ways:
   default), so shapes follow the pitches when you edit.
 - **On the command line**: audio in, MusicXML out.
 
-## Setup (once)
+## Install or update the engine
 
 Requires Python 3.10+.
 
@@ -17,6 +17,17 @@ Requires Python 3.10+.
 python3 setup_engine.py          # creates .venv next to this script
 python3 setup_engine.py --user   # or in the MuseScore user data folder (read-only app installs)
 ```
+
+After downloading a newer build, use its setup script with the same install
+location as before. For the AppImage, run:
+
+```sh
+python3 audio2shapenote/setup_engine.py --user --upgrade
+```
+
+Setup reuses the existing virtual environment and cached vocal model. Use
+`--upgrade` to refresh Python dependencies. The new AppImage contains the new
+engine scripts, so launch that AppImage after updating.
 
 MuseScore finds that `.venv` automatically. Otherwise it uses `python3`/`python`
 on PATH, or the `MUSESCORE_AUDIO_PYTHON` environment variable.

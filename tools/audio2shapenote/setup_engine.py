@@ -55,6 +55,10 @@ def main():
     pip("--no-deps", "basic-pitch")
     subprocess.check_call([str(py), "-c",
                            "import basic_pitch, music21, librosa, onnxruntime; print('engine ready')"])
+    # vocal-isolation model (~65 MB) used to strip instruments before transcribing
+    subprocess.check_call([str(py), "-c",
+                           "import sys; sys.path.insert(0, %r); import separate; "
+                           "print('vocal model:', separate.ensure_model(prefer_user=%r))" % (str(HERE), a.user)])
     print(f"done. Python for MuseScore: {py}")
 
 

@@ -42,22 +42,29 @@ The command line also works: `mscore -o song.mscz song.wav`.
 .venv/bin/python audio2shapenote.py song.wav --voices 4 --system funk --time-sig 3/4 --bpm 80
 ```
 
-Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--time-sig auto|N/4`,
+Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--ensemble auto|mixed|male`,
+`--separate auto|on|off`, `--legato BEATS`, `--time-sig auto|N/4`,
 `--pickup BEATS` (with a fixed time signature), `--key SHARPS` (negative = flats),
 `--bpm`, `--grid 1|2|4` (notes per beat), `--onset/--frame` (model sensitivity),
 `--report out.json` (summary with every note and its shape).
 
 ## How it works
 
+0. **Vocal isolation** (`separate.py`): an MDX-Net model (UVR "Voc_FT", ONNX) strips guitar,
+   banjo, bass etc. Used automatically when the recording has instruments; skipped for
+   pure a cappella. `setup_engine.py` downloads the model (~65 MB) from GitHub.
 1. **Notes**: Spotify Basic Pitch (bundled ONNX model, no TensorFlow).
 2. **Clean-up**: same-pitch fragments caused by vibrato or reverb are joined unless
    a real onset is there (audio onset detector, or another part moving to a new
    pitch); overtone ghosts are dropped.
 3. **Rhythm**: tempo from librosa refined by fitting onsets to the grid, then a
    tempo-following quantiser so slow drift does not accumulate.
-4. **Parts**: notes starting together are matched to Treble/Alto/Tenor/Bass by
-   voice-leading distance plus each part's normal range (shape-note order:
-   Treble, Alto, Tenor, Bass; tenor on a treble-8vb clef).
+4. **Parts**: the group is detected as **mixed** (Treble/Alto/Tenor/Bass, shape-note
+   order) or **male** (Tenor/Lead/Baritone/Bass, gospel/bluegrass quartet) from its
+   pitch range. Notes starting together are matched to parts by voice-leading distance
+   plus each part's normal range; short rests inside a phrase are closed by holding the
+   previous note (`--legato`). Overtones (octave/12th/15th ghosts) and notes far outside
+   the group's range are dropped.
 5. **Key, meter, pickup**: Krumhansl–Schmuckler key; meter and pickup chosen so
    long notes and chord changes land on downbeats.
 6. **Output**: MusicXML where every note has a `<notehead>` syllable
@@ -81,7 +88,11 @@ Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--time-sig auto|N
 | Synthetic 4-part chorale, 3/4 with pickup | 100% | 100% | all right |
 | Same chorale + reverb, noise, ±3% tempo drift, low-pass | 59% | 34% | meter right, pickup missed |
 
-No real choir recordings have been tested yet. Expect real Sacred Harp
+| Doyle Lawson & Quicksilver, "Passed All Sorrow" (real men's quartet, 2:38) | not measurable (no reference score) | readable quartet layout; before: mixed-choir staves full of 16ths |
+
+First real recording: earlier versions read overtones as extra singers and assumed
+mixed-choir ranges, which produced unreadable output. Fixed by ensemble detection,
+simultaneous-overtone removal, range limits, legato fill and vocal isolation. Expect real Sacred Harp
 recordings (big rooms, many singers per part, octave doubling of treble and
 tenor) to land between the last two rows and need hand correction.
 

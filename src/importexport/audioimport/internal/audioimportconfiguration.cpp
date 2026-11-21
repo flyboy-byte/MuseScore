@@ -63,7 +63,7 @@ void AudioImportConfiguration::init()
     settings()->setDescription(TEMPO_KEY, "Audio import: tempo in BPM (0 = detect)");
     settings()->setCanBeManuallyEdited(TEMPO_KEY, true, Val(0), Val(300));
 
-    settings()->setDefaultValue(TIMEOUT_KEY, Val(600));
+    settings()->setDefaultValue(TIMEOUT_KEY, Val(1800));
     settings()->setDescription(TIMEOUT_KEY, "Audio import: maximum transcription time in seconds");
     settings()->setCanBeManuallyEdited(TIMEOUT_KEY, true, Val(10), Val(7200));
 }

@@ -33,14 +33,38 @@ SYLLABLES_7 = ["do", "re", "mi", "fa", "so", "la", "ti"]
 SYLLABLES_4 = ["fa", "so", "la", "fa", "so", "la", "mi"]
 LETTERS = "CDEFGAB"
 
-# Shape-note books order parts Treble, Alto, Tenor (melody), Bass.
-VOICE_SETS = {
-    1: [("Melody", (55, 79), "treble")],
-    2: [("Treble", (57, 81), "treble"), ("Bass", (40, 64), "bass")],
-    3: [("Treble", (57, 81), "treble"), ("Tenor", (48, 69), "treble8vb"), ("Bass", (40, 64), "bass")],
-    4: [("Treble", (59, 81), "treble"), ("Alto", (53, 74), "treble"),
-        ("Tenor", (48, 69), "treble8vb"), ("Bass", (40, 62), "bass")],
+# Part layouts. Shape-note books order mixed parts Treble, Alto, Tenor (melody), Bass;
+# men's gospel/bluegrass quartets are Tenor, Lead (melody), Baritone, Bass.
+ENSEMBLES = {
+    "mixed": {
+        1: [("Melody", (55, 79), "treble")],
+        2: [("Treble", (57, 81), "treble"), ("Bass", (40, 64), "bass")],
+        3: [("Treble", (57, 81), "treble"), ("Tenor", (48, 69), "treble8vb"), ("Bass", (40, 64), "bass")],
+        4: [("Treble", (59, 81), "treble"), ("Alto", (53, 74), "treble"),
+            ("Tenor", (48, 69), "treble8vb"), ("Bass", (40, 62), "bass")],
+    },
+    "male": {
+        1: [("Melody", (45, 69), "treble8vb")],
+        2: [("Lead", (50, 70), "treble8vb"), ("Bass", (36, 60), "bass")],
+        3: [("Tenor", (55, 74), "treble8vb"), ("Lead", (50, 69), "treble8vb"), ("Bass", (36, 60), "bass")],
+        4: [("Tenor", (56, 74), "treble8vb"), ("Lead", (52, 70), "treble8vb"),
+            ("Baritone", (47, 66), "bass"), ("Bass", (36, 58), "bass")],
+    },
 }
+VOICE_SETS = ENSEMBLES["mixed"]  # backwards compatible name
+
+
+def detect_ensemble(events):
+    """Men's groups sit about an octave lower than mixed choirs; judge by the
+    duration-weighted median pitch of the cleaned notes."""
+    if not events:
+        return "mixed"
+    p = np.array([e[2] for e in events], float)
+    w = np.array([e[1] - e[0] for e in events], float)
+    order = np.argsort(p)
+    cum = np.cumsum(w[order])
+    median = p[order][np.searchsorted(cum, cum[-1] / 2)]
+    return "male" if median < 60 else "mixed"
 
 
 # ----------------------------------------------------------------------------- transcription
@@ -65,19 +89,39 @@ def transcribe(audio_path, onset=0.5, frame=0.3, min_ms=110.0, polyphonic=False)
     return [(float(s), float(e), int(p), float(a)) for s, e, p, a, _ in events]
 
 
-def remove_harmonics(events, min_lead=0.12):
+def remove_harmonics(events, min_lead=0.12, tol=0.06, ceiling=None):
     """Drop overtone ghosts: a note an octave, twelfth or two octaves above a
-    louder note that started earlier and is still sounding. Real doublings in
-    sung parts start together with the lower note, so they are kept."""
+    note sounding at the same time.
+
+    - lower note started clearly earlier and is louder: ghost (re-triggered overtone)
+    - both start together: ghost if clearly quieter (real doublings are about as
+      loud), or if it sits above the ensemble's ceiling (no singer is up there)
+    Real doublings, which start together and are as loud, are kept.
+    """
     keep = []
     for i, (s, e, p, a) in enumerate(events):
-        ghost = any(
-            p - p2 in (12, 19, 24) and s2 <= s - min_lead and e2 > s + 0.05 and a < 0.9 * a2
-            for j, (s2, e2, p2, a2) in enumerate(events) if j != i
-        )
+        ghost = False
+        for j, (s2, e2, p2, a2) in enumerate(events):
+            iv = p - p2
+            if j == i or iv not in (12, 19, 24) or e2 <= s + 0.05:
+                continue
+            if s2 <= s - min_lead:
+                ghost = a < 0.9 * a2
+            elif abs(s2 - s) <= tol:
+                if ceiling is not None and p > ceiling:
+                    ghost = True
+                else:
+                    ghost = a < 0.6 * a2
+            if ghost:
+                break
         if not ghost:
             keep.append((s, e, p, a))
     return keep
+
+
+def drop_slivers(events, min_len=0.15, min_amp=0.4):
+    """Very short, quiet notes are almost always consonants, scoops or bleed."""
+    return [e for e in events if (e[1] - e[0]) >= min_len or e[3] >= min_amp]
 
 
 def thin_chord(items, n):
@@ -249,7 +293,7 @@ def monophonic(notes):
     return [(su, du, p) for su, du, p, _ in seq]
 
 
-def assign_voices(notes, n_voices):
+def assign_voices(notes, n_voices, voice_set=None, legato=0):
     """Assign quantised notes to n monophonic voices (top voice first).
 
     Notes starting together form a chord. Each chord's pitches are matched to an
@@ -259,8 +303,8 @@ def assign_voices(notes, n_voices):
     still ringing, otherwise rests.
     """
     if n_voices == 1:
-        return [monophonic(notes)]
-    ranges = [r for _, r, _ in VOICE_SETS[n_voices]]
+        return [fill_gaps(monophonic(notes), legato)]
+    ranges = [r for _, r, _ in (voice_set or VOICE_SETS[n_voices])]
     centers = [(lo + hi) / 2 for lo, hi in ranges]
     last = list(centers)
     voices = [[] for _ in range(n_voices)]
@@ -297,7 +341,20 @@ def assign_voices(notes, n_voices):
         v.sort()
         for i in range(len(v) - 1):
             v[i][1] = max(1, min(v[i][1], v[i + 1][0] - v[i][0]))
-    return [[tuple(n) for n in v] for v in voices]
+    return [fill_gaps([tuple(n) for n in v], legato) for v in voices]
+
+
+def fill_gaps(voice, max_gap):
+    """Singers sustain into the next note: close rests shorter than max_gap grid
+    units by lengthening the previous note (removes rest/tie clutter)."""
+    if max_gap <= 0:
+        return voice
+    out = [list(n) for n in voice]
+    for i in range(len(out) - 1):
+        gap = out[i + 1][0] - (out[i][0] + out[i][1])
+        if 0 < gap <= max_gap:
+            out[i][1] += gap
+    return [tuple(n) for n in out]
 
 
 def auto_voice_count(notes):
@@ -441,21 +498,55 @@ def run(a):
         raise FileNotFoundError(audio)
     out = Path(a.output) if a.output else audio.with_suffix(".musicxml")
 
+    source = audio
+    separated = False
+    if a.separate != "off":
+        try:
+            import tempfile
+            import soundfile as sf
+            from separate import separate_vocals
+            voc, sr = separate_vocals(audio)
+            import librosa
+            mix, _ = librosa.load(str(audio), sr=sr, mono=False)
+            mix = mix if mix.ndim == 2 else np.stack([mix, mix])
+            n = min(mix.shape[1], voc.shape[1])
+            ratio = float(np.sqrt(np.mean(voc[:, :n] ** 2)) / (np.sqrt(np.mean(mix[:2, :n] ** 2)) + 1e-9))
+            # ~1 (>0.98): already a cappella (keep the original, no artifacts);
+            # very low: the model did not hear human voices (keep the original too)
+            if a.separate == "on" or 0.3 <= ratio <= 0.98:
+                tmpdir = tempfile.mkdtemp(prefix="a2s_")
+                source = Path(tmpdir) / "vocals.wav"
+                sf.write(str(source), voc.T, sr)
+                separated = True
+            else:
+                print(f"note: vocal separation not used (vocals/mix level {ratio:.2f})", file=sys.stderr)
+        except Exception as e:  # model missing/offline: carry on with the mix
+            if a.separate == "on":
+                raise
+            print(f"warning: vocal separation skipped ({e})", file=sys.stderr)
+
     voices_req = a.voices
     poly = voices_req != 1
-    ev = transcribe(audio, a.onset, a.frame, a.min_ms, polyphonic=poly)
-    ev = merge_fragments(ev, detect_onsets(audio))
+    ev = transcribe(source, a.onset, a.frame, a.min_ms, polyphonic=poly)
+    ev = merge_fragments(ev, detect_onsets(source))
+    ev = drop_slivers(ev)
+    ensemble = a.ensemble if a.ensemble != "auto" else detect_ensemble(remove_harmonics(ev) if poly else ev)
+    sets = ENSEMBLES[ensemble]
     if poly:
-        ev = remove_harmonics(ev)
+        top_hi = sets[4][0][1][1]
+        bottom_lo = sets[4][-1][1][0]
+        ev = remove_harmonics(ev, ceiling=top_hi)
+        # nobody in the group sings this far outside the outer parts: octave errors
+        ev = [e for e in ev if bottom_lo - 3 <= e[2] <= top_hi + 2]
     if not ev:
         return None, 3
     ev.sort()
     t0 = ev[0][0]
-    bpm = a.bpm or estimate_bpm(audio, ev, a.grid)
+    bpm = a.bpm or estimate_bpm(source, ev, a.grid)
     q = quantise(ev, bpm, a.grid, t0)
     n_voices = auto_voice_count(q) if voices_req == 0 else voices_req
-    voice_set = VOICE_SETS[n_voices]
-    voices = assign_voices(q, n_voices)
+    voice_set = sets[n_voices]
+    voices = assign_voices(q, n_voices, voice_set, legato=a.grid * a.legato)
 
     weights = [(p, du / a.grid) for v in voices for _, du, p in v]
     key_obj = pick_key(weights)
@@ -478,6 +569,7 @@ def run(a):
         "output": str(out), "events": len(ev), "voices": [name for name, *_ in voice_set],
         "bpm": bpm, "key": f"{key_obj.tonic.name} {key_obj.mode}", "sharps": sharps,
         "time_signature": f"{beats}/4", "pickup_beats": pickup / a.grid, "system": a.system,
+        "ensemble": ensemble, "separated": separated,
         "notes": report,
     }
     return summary, 0
@@ -490,6 +582,12 @@ def parse_args(argv):
     ap.add_argument("--system", choices=["aikin", "funk", "walker", "4shape"], default="aikin")
     ap.add_argument("--voices", type=int, default=0, choices=[0, 1, 2, 3, 4],
                     help="number of parts; 0 = detect (default)")
+    ap.add_argument("--ensemble", choices=["auto", "mixed", "male"], default="auto",
+                    help="mixed = Treble/Alto/Tenor/Bass, male = Tenor/Lead/Baritone/Bass (default: detect)")
+    ap.add_argument("--separate", choices=["auto", "on", "off"], default="auto",
+                    help="isolate vocals from instruments first (auto: when instruments are present and the model is available)")
+    ap.add_argument("--legato", type=float, default=1.0,
+                    help="close rests up to this many beats by holding the previous note (0 = off)")
     ap.add_argument("--bpm", type=int, help="tempo (default: estimate)")
     ap.add_argument("--time-sig", default="auto", help="e.g. 4/4, 3/4, or auto (default)")
     ap.add_argument("--pickup", type=float, default=0, help="pickup length in beats (with fixed --time-sig)")

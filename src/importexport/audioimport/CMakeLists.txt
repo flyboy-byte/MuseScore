@@ -40,6 +40,7 @@ install(FILES
     ${PROJECT_SOURCE_DIR}/tools/audio2shapenote/audio2shapenote.py
     ${PROJECT_SOURCE_DIR}/tools/audio2shapenote/requirements.txt
     ${PROJECT_SOURCE_DIR}/tools/audio2shapenote/setup_engine.py
+    ${PROJECT_SOURCE_DIR}/tools/audio2shapenote/separate.py
     DESTINATION ${MUSE_APP_INSTALL_RESOURCES_LOCATION}/audio2shapenote
 )
 

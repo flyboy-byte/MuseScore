@@ -145,7 +145,7 @@ muse::Ret NotationAudioReader::read(MasterScore* score, const io::path_t& path, 
     if (!process.waitForStarted(15000)) {
         return make_ret(Ret::Code::NotSupported,
                         "Could not start Python (" + python + "). Install Python 3.10+ and run setup_engine.py, "
-                        "or set io/audioImport/pythonExecutable in Preferences > Advanced.");
+                                                              "or set io/audioImport/pythonExecutable in Preferences > Advanced.");
     }
 
     const int timeoutMs = std::max(10, configuration()->timeoutSeconds()) * 1000;

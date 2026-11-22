@@ -59,6 +59,26 @@ Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--ensemble auto|m
 `--bpm`, `--grid 1|2|4` (notes per beat), `--onset/--frame` (model sensitivity),
 `--report out.json` (summary with every note and its shape).
 
+## Match a transcription to an existing score
+
+Export your existing score as MusicXML from MuseScore. Generate a second MusicXML
+file from the audio, then align the two:
+
+```sh
+.venv/bin/python audio2shapenote.py recording.mp3 -o transcription.musicxml
+.venv/bin/python score_review.py compare existing.musicxml transcription.musicxml -o review.json
+.venv/bin/python score_review.py apply existing.musicxml review.json --select 1 3 -o patched.musicxml
+```
+
+The review lists corresponding beats and tentative pitch changes for uniquely
+named parts. Each suggestion includes the staff, measure, and before/after pitches.
+Choose the patch IDs you have checked against the recording. Apply writes a new
+MusicXML copy and checks that the reference still matches the reviewed file.
+This compares transcribed pitches, so a disagreement can come from either score
+or from an alignment error. It does not assign singers or patch durations, ties,
+chords, or transposing parts. Use same-key scores in performance order with
+matching part names.
+
 ## How it works
 
 0. **Vocal isolation** (`separate.py`): an MDX-Net model (UVR "Voc_FT", ONNX) strips guitar,
@@ -68,8 +88,9 @@ Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--ensemble auto|m
 2. **Clean-up**: same-pitch fragments caused by vibrato or reverb are joined unless
    a real onset is there (audio onset detector, or another part moving to a new
    pitch); overtone ghosts are dropped.
-3. **Rhythm**: tempo from librosa refined by fitting onsets to the grid, then a
-   tempo-following quantiser so slow drift does not accumulate.
+3. **Rhythm**: tempo from librosa refined by fitting onsets to the grid. Both
+   estimated and manual tempo use one recording clock, so rounding one onset
+   cannot shift later measures. This uses a single tempo for the piece.
 4. **Parts**: the group is detected as **mixed** (Treble/Alto/Tenor/Bass, shape-note
    order) or **male** (Tenor/Lead/Baritone/Bass, gospel/bluegrass quartet) from its
    pitch range. Notes starting together are matched to parts by voice-leading distance
@@ -90,6 +111,17 @@ Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--ensemble auto|m
 ```
 
 `make_test_clip.py melody|chorale out.wav` writes the test audio and a `.truth.json`.
+
+To run a timing regression against a recording you already have:
+
+```sh
+.venv/bin/python test_engine.py --audio recording.mp3 --tolerance 2
+```
+
+This runs transcription on the mix and checks the span from the first to the last
+detected note against the duration of the score at its reported tempo. It measures
+timing drift, not pitch or voice accuracy. The audio is read locally and does not
+need to be checked into the repository.
 
 ## Accuracy so far
 

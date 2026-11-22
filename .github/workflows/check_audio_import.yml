@@ -247,7 +247,7 @@ jobs:
         test -n "$APPIMAGE" || { echo "no AppImage produced"; exit 1; }
         mkdir -p dist/audio2shapenote
         cp "$APPIMAGE" dist/
-        cp tools/audio2shapenote/{audio2shapenote.py,separate.py,setup_engine.py,requirements.txt,README.md,make_test_clip.py} dist/audio2shapenote/
+        cp tools/audio2shapenote/{audio2shapenote.py,separate.py,setup_engine.py,requirements.txt,README.md,make_test_clip.py,test_engine.py,score_review.py,test_shapes.py} dist/audio2shapenote/
         cat > dist/HOW_TO_RUN.txt <<'TXT'
         MuseScore with audio-to-shape-note import (Linux, x86_64)
 

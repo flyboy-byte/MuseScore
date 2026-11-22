@@ -5,6 +5,7 @@ and check accuracy. Needs the engine environment (run setup_engine.py first).
 
     python test_engine.py            # clean clips must be exact
 """
+import argparse
 from collections import Counter
 import json
 import sys
@@ -67,10 +68,14 @@ def check(kind, voices):
         assert len(xml.findall(".//notehead")) == expected
 
 
-def check_fixed_tempo():
+def check_timing_grid():
     events = [(onset, onset + 0.2, 60, 1) for onset in (0, 0.35, 0.7, 1.05)]
-    notes = engine.quantise(events, bpm=120, grid=2, t0=0, follow=0)
+    notes = engine.quantise(events, bpm=120, grid=2, t0=0)
     assert [n[0] for n in notes] == [0, 1, 3, 4]
+    events = [(i * .35, i * .35 + .2, 60, 1) for i in range(250)]
+    notes = engine.quantise(events, bpm=120, grid=2, t0=0)
+    assert notes[-1][0] == round(events[-1][0] * 4)
+    assert notes[-1][0] + notes[-1][1] == max(notes[-1][0] + 1, round(events[-1][1] * 4))
 
 
 def check_pickup_with_late_entrance():
@@ -90,8 +95,63 @@ def check_pickup_with_late_entrance():
     assert xml.find("part[2]/measure/note/rest") is not None
 
 
+def check_score_review():
+    from music21 import key, note, stream
+    from score_review import apply_patches, compare, read_score
+
+    def write(path, pitches):
+        score = stream.Score()
+        part = stream.Part()
+        part.partName = "Lead"
+        part.append(key.KeySignature(0))
+        for midi in pitches:
+            event = note.Note(midi)
+            event.notehead = engine.SYLLABLES_7[engine.shape_degree(event.pitch, 0)]
+            part.append(event)
+        score.append(part)
+        score.write("musicxml", fp=str(path))
+
+    with tempfile.TemporaryDirectory() as d:
+        reference, transcription, output, review = [Path(d) / f for f in (
+            "reference.musicxml", "transcription.musicxml", "patched.musicxml", "review.json"
+        )]
+        write(reference, [60, 62, 64, 65, 67, 69, 71, 72])
+        write(transcription, [60, 62, 66, 65, 67, 69, 71, 72])
+        payload = compare(reference, transcription)
+        assert len(payload["pitch_patches"]) == 1
+        patch = payload["pitch_patches"][0]
+        assert patch["reference_beat"] == "2" and patch["from"] == "E4" and patch["to"] == "F#4"
+        review.write_text(json.dumps(payload), encoding="utf-8")
+        apply_patches(reference, review, [patch["id"]], output)
+        actual = read_score(output).parts[0].recurse().notes
+        assert [n.pitch.midi for n in actual] == [60, 62, 66, 65, 67, 69, 71, 72]
+        assert actual[2].notehead == "fa"
+        assert read_score(reference).parts[0].recurse().notes[2].pitch.midi == 64
+
+
+def check_recording(path, tolerance):
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "result.musicxml"
+        args = engine.parse_args([str(path), "--separate", "off", "-o", str(out)])
+        report, code = engine.run(args)
+        assert code == 0, f"transcription failed with exit code {code}"
+        score_span = max(n["beat"] + n["beats"] for n in report["notes"]) * 60 / report["bpm"]
+        audio_span = report["audio_event_span_seconds"]
+        drift = score_span - audio_span
+        print(f"{path.name}: audio events={audio_span:.2f}s score={score_span:.2f}s drift={drift:+.2f}s")
+        assert abs(drift) <= tolerance, f"duration difference exceeded {tolerance:g}s"
+
+
 if __name__ == "__main__":
-    check_fixed_tempo()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audio", type=Path, help="check a local recording for end-to-end timing drift")
+    parser.add_argument("--tolerance", type=float, default=2.0, help="allowed duration difference in seconds")
+    args = parser.parse_args()
+    if args.audio:
+        check_recording(args.audio, args.tolerance)
+        sys.exit(0)
+    check_timing_grid()
+    check_score_review()
     check_pickup_with_late_entrance()
     check("melody", 1)
     check("chorale", 4)

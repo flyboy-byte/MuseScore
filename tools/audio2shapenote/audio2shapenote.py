@@ -239,47 +239,27 @@ def cluster_times(times, tol=0.05):
     return [float(np.mean(c)) for c in out]
 
 
-def quantise(events, bpm, grid, t0, follow=0.25):
-    """Map note times to grid units, letting the tempo drift slowly (a simple
-    phase-locked loop on chord onsets), so rubato/drift does not pile up."""
-    unit0 = 60.0 / bpm / grid
-    unit = unit0
-    starts = cluster_times([s for s, *_ in events])
-    pos_of = {}
-    t_prev, q_prev = t0, 0
-    unit_at = {}
-    for t in starts:
-        if follow:
-            raw = q_prev + (t - t_prev) / unit
-            q = max(q_prev + (1 if t > t_prev + 0.5 * unit else 0), int(round(raw)))
-            span = q - q_prev
-            if span > 0:
-                err = raw - q
-                unit *= 1 + follow * err / span
-                unit = min(max(unit, unit0 * 0.8), unit0 * 1.25)
-        else:
-            q = max(0, round((t - t0) / unit0))
-        pos_of[t] = q
-        unit_at[t] = unit
-        t_prev, q_prev = t, q
+def quantise(events, bpm, grid, t0):
+    """Round onsets against one recording clock so rounding errors cannot accumulate."""
+    unit = 60.0 / bpm / grid
+    starts = np.array(cluster_times([s for s, *_ in events]))
+    positions = np.maximum(0, np.rint((starts - t0) / unit)).astype(int)
 
-    keys = np.array(sorted(pos_of))
-
-    def nearest(t):
-        i = int(np.argmin(np.abs(keys - t)))
-        return keys[i]
+    def nearest(t, first=0):
+        # Consider only the two neighbours of the insertion point.
+        right = min(len(starts) - 1, max(first, np.searchsorted(starts, t)))
+        left = max(first, right - 1)
+        return min((left, right), key=lambda i: abs(starts[i] - t))
 
     out = []
     for s, e, p, a in events:
-        k = nearest(s)
-        su = pos_of[k]
-        # end: snap to the next chord onset when the note runs into it
-        later = keys[keys > k]
-        ke = later[np.argmin(np.abs(later - e))] if len(later) else None
-        if ke is not None and abs(ke - e) < 0.12:
-            eu = pos_of[ke]
-        else:
-            eu = su + int(round((e - s) / unit_at[k]))
+        i = nearest(s)
+        su = int(positions[i])
+        eu = round((e - t0) / unit)
+        if i + 1 < len(starts):
+            j = nearest(e, i + 1)
+            if abs(starts[j] - e) < 0.12:
+                eu = int(positions[j])
         out.append([su, max(1, eu - su), p, a])
     return out
 
@@ -562,7 +542,7 @@ def transcribe_score(a, temp_dir):
     ev.sort()
     t0 = ev[0][0]
     bpm = a.bpm or estimate_bpm(source, ev, a.grid)
-    q = quantise(ev, bpm, a.grid, t0, follow=0 if a.bpm is not None else 0.25)
+    q = quantise(ev, bpm, a.grid, t0)
     n_voices = auto_voice_count(q) if voices_req == 0 else voices_req
     voice_set = sets[n_voices]
     voices = assign_voices(q, n_voices, voice_set, legato=a.grid * a.legato)
@@ -585,6 +565,7 @@ def transcribe_score(a, temp_dir):
         "sharps": sharps,
         "time_signature": f"{beats}/4", "pickup_beats": pickup / a.grid, "system": a.system,
         "ensemble": ensemble, "separated": separated,
+        "audio_event_span_seconds": max(end for _, end, _, _ in ev) - t0,
         "notes": report,
     }
     return summary, 0

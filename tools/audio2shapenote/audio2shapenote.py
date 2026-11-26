@@ -121,6 +121,32 @@ def remove_harmonics(events, min_lead=0.12, tol=0.06, ceiling=None):
     return keep
 
 
+def drop_silent(events, audio_path, floor_db=50.0):
+    """Drop notes where the original recording is silent.
+
+    Vocal isolation leaves a faint noise floor where the recording is silent, and the
+    note detector can find pitches in it (a lone note in the silent tail of a real
+    recording, about 60 dB below the music). Loudness is judged on the original file,
+    relative to its loud passages."""
+    try:
+        import librosa
+        y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
+    except Exception:
+        return events
+    hop = 512
+    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+    if not len(rms) or rms.max() <= 0:
+        return events
+    floor = np.percentile(rms, 95) * 10 ** (-floor_db / 20)
+    keep = []
+    for ev in events:
+        a = int(ev[0] * sr / hop)
+        b = max(a + 1, int(ev[1] * sr / hop))
+        if rms[a:b].size and rms[a:b].mean() >= floor:
+            keep.append(ev)
+    return keep
+
+
 def drop_slivers(events, min_len=0.15, min_amp=0.4):
     """Very short, quiet notes are almost always consonants, scoops or bleed."""
     return [e for e in events if (e[1] - e[0]) >= min_len or e[3] >= min_amp]
@@ -191,8 +217,12 @@ def merge_fragments(events, onsets, gap=0.16, tol=0.07, min_len=0.1):
 
 # ----------------------------------------------------------------------------- rhythm
 
-def estimate_bpm(audio_path, events, grid, lo=50, hi=150):
-    """librosa beat tracker as a prior, refined so note onsets sit on the grid."""
+def estimate_bpm(audio_path, events, grid, lo=50, hi=150, window=20.0, step=0.05):
+    """Starting tempo: librosa beat tracker as a prior, refined so the onsets of the
+    first `window` seconds sit on the grid. Later tempo changes are followed by
+    track_clock, so only the opening needs to fit; a short window also keeps the fit
+    from being dominated by drift. `step` must stay fine: over a long window the fit
+    is sharp, and a coarse search can miss the true tempo and pick an alias."""
     prior = None
     try:
         import librosa
@@ -208,25 +238,22 @@ def estimate_bpm(audio_path, events, grid, lo=50, hi=150):
 
     onsets = np.array(sorted({round(s, 3) for s, *_ in events}))
     if len(onsets) < 3:
-        return int(round(prior or 90))
+        return float(round(prior or 90, 2))
     onsets = onsets - onsets[0]
+    opening = onsets[onsets <= window]
+    if len(opening) >= 8:
+        onsets = opening
 
-    def misfit(bpm):
-        unit = 60.0 / bpm / grid
-        x = onsets / unit
-        return float(np.mean(np.abs(x - np.round(x))))  # 0 .. 0.5 grid units
-
-    candidates = np.arange(lo, hi + 0.01, 0.5)
-    scores = []
-    for b in candidates:
-        m = misfit(b)
-        # finer grids always fit better: penalise fast tempi, pull toward the prior
-        pen = 0.002 * (b - lo) / 10
-        if prior:
-            pen += 0.15 * abs(np.log2(b / prior))
-        scores.append(m + pen)
-    best = float(candidates[int(np.argmin(scores))])
-    return int(round(best))
+    candidates = np.arange(lo, hi + step / 2, step)
+    units = 60.0 / candidates / grid
+    x = onsets[None, :] / units[:, None]
+    misfit = np.mean(np.abs(x - np.round(x)), axis=1)  # 0 .. 0.5 grid units
+    # finer grids always fit better: penalise fast tempi, pull toward the prior
+    pen = 0.002 * (candidates - lo) / 10
+    if prior:
+        pen = pen + 0.15 * np.abs(np.log2(candidates / prior))
+    best = float(candidates[int(np.argmin(misfit + pen))])
+    return round(best, 2)
 
 
 def cluster_times(times, tol=0.05):
@@ -239,11 +266,128 @@ def cluster_times(times, tol=0.05):
     return [float(np.mean(c)) for c in out]
 
 
-def quantise(events, bpm, grid, t0):
-    """Round onsets against one recording clock so rounding errors cannot accumulate."""
-    unit = 60.0 / bpm / grid
+class Clock:
+    """Maps recording time (seconds) to grid position through knots (time, position);
+    linear between knots and extended at the outer slopes beyond them."""
+
+    def __init__(self, times, positions, first_slope, last_slope):
+        self.times = np.asarray(times, float)
+        self.positions = np.asarray(positions, float)
+        self.first_slope, self.last_slope = first_slope, last_slope
+
+    @classmethod
+    def steady(cls, bpm, grid, t0):
+        slope = bpm * grid / 60.0
+        return cls([t0], [0.0], slope, slope)
+
+    def __call__(self, t):
+        t = np.asarray(t, float)
+        out = np.interp(t, self.times, self.positions)
+        out = np.where(t < self.times[0], self.positions[0] + (t - self.times[0]) * self.first_slope, out)
+        return np.where(t > self.times[-1], self.positions[-1] + (t - self.times[-1]) * self.last_slope, out)
+
+    def seconds(self, position):
+        """Inverse: recording time of a grid position."""
+        p = np.asarray(position, float)
+        out = np.interp(p, self.positions, self.times)
+        out = np.where(p < self.positions[0], self.times[0] + (p - self.positions[0]) / self.first_slope, out)
+        return np.where(p > self.positions[-1], self.times[-1] + (p - self.positions[-1]) / self.last_slope, out)
+
+
+def track_clock(starts, bpm, grid, window=10.0, accept=0.25, min_span=2.0, max_change=0.25, knot_every=4.0):
+    """Follow a tempo that changes gradually (live singing rarely holds one tempo).
+
+    Walks the onset clusters in order. Each one is placed at the grid position predicted
+    by a straight-line fit of the recent onsets that sat cleanly on the grid (within
+    `accept` grid units); others, such as syncopations and ornaments, are placed but not
+    trusted for the fit. The local tempo may drift at most `max_change` from `bpm`.
+    """
+    starts = np.asarray(starts, float)
+    slope0 = bpm * grid / 60.0
+    lo, hi = slope0 * (1 - max_change), slope0 * (1 + max_change)
+    slope = slope0
+    anchors = [(starts[0], 0)]
+    positions = [0]
+    for t in starts[1:]:
+        recent = [(at, ap) for at, ap in anchors if at >= t - window]
+        if len(recent) >= 3 and recent[-1][0] - recent[0][0] >= min_span:
+            ts, ps = np.array(recent, float).T
+            fit = float(np.polyfit(ts, ps, 1)[0])
+            slope = min(hi, max(lo, fit))
+            predicted = ps.mean() + slope * (t - ts.mean())
+        else:
+            at, ap = anchors[-1]
+            predicted = ap + slope * (t - at)
+        # never move backwards; a ragged chord split into two clusters may share a position
+        position = max(positions[-1], int(np.rint(predicted)))
+        if abs(predicted - position) <= accept:
+            anchors.append((t, position))
+        positions.append(position)
+
+    # A smooth clock through the trusted onsets: one knot every few seconds from a local
+    # straight-line fit, so a single loose onset cannot bend the grid.
+    at, ap = np.array(anchors, float).T
+    knots_t, knots_p = [], []
+    for tk in np.arange(at[0], at[-1] + knot_every, knot_every):
+        near = np.abs(at - tk) <= window / 2
+        if near.sum() >= 3 and np.ptp(at[near]) >= min_span:
+            k, c = np.polyfit(at[near], ap[near], 1)
+            p = k * tk + c
+            if not knots_p or p > knots_p[-1]:
+                knots_t.append(float(tk))
+                knots_p.append(float(p))
+    if len(knots_t) < 2:
+        return Clock.steady(bpm, grid, starts[0])
+    first = (knots_p[1] - knots_p[0]) / (knots_t[1] - knots_t[0])
+    last = (knots_p[-1] - knots_p[-2]) / (knots_t[-1] - knots_t[-2])
+    return Clock(knots_t, knots_p, first, last)
+
+
+def refine_bpm(starts, bpm, grid, spread=0.03):
+    """Best steady tempo for the whole piece, searched within `spread` of `bpm`.
+
+    The step shrinks with the length of the piece: over T seconds the fit is only about
+    15 / (grid * T) BPM wide, and a coarser step can step over it."""
+    starts = np.asarray(starts, float)
+    span = starts[-1] - starts[0]
+    if span <= 0:
+        return bpm
+    step = min(0.05, 3.0 / (grid * span))
+    candidates = np.arange(bpm * (1 - spread), bpm * (1 + spread) + step / 2, step)
+    x = (starts[None, :] - starts[0]) * candidates[:, None] * grid / 60.0
+    misfit = np.mean(np.abs(x - np.rint(x)), axis=1)
+    return round(float(candidates[int(np.argmin(misfit))]), 2)
+
+
+def grid_misfit(clock, starts):
+    """Mean distance of onsets from the nearest grid line, in grid units (0.25 is random)."""
+    x = clock(np.asarray(starts, float))
+    return float(np.mean(np.abs(x - np.rint(x))))
+
+
+def choose_clock(starts, bpm, grid, margin=0.75, good_fit=0.08):
+    """Steady tempo unless following tempo changes fits the onsets clearly better.
+
+    Sung onsets are loose, so a tracker can wander on a recording made to a steady beat
+    (it did on a studio quartet recording). It is only used when the steady grid fits
+    poorly (misfit above `good_fit`) and leaves the onsets `margin` times further off."""
+    steady_bpm = refine_bpm(starts, bpm, grid)
+    steady = Clock.steady(steady_bpm, grid, starts[0])
+    tracked = track_clock(starts, bpm, grid)
+    s, t = grid_misfit(steady, starts), grid_misfit(tracked, starts)
+    if s > good_fit and t < margin * s:
+        return tracked, "tracked", steady_bpm, (s, t)
+    return steady, "steady", steady_bpm, (s, t)
+
+
+def quantise(events, bpm, grid, t0, clock=None):
+    """Round onsets against one recording clock so rounding errors cannot accumulate.
+
+    Without `clock`, the tempo is `bpm` throughout; pass a Clock from track_clock to
+    follow tempo changes."""
+    clock = clock or Clock.steady(bpm, grid, t0)
     starts = np.array(cluster_times([s for s, *_ in events]))
-    positions = np.maximum(0, np.rint((starts - t0) / unit)).astype(int)
+    positions = np.maximum(0, np.rint(clock(starts))).astype(int)
 
     def nearest(t, first=0):
         # Consider only the two neighbours of the insertion point.
@@ -255,7 +399,7 @@ def quantise(events, bpm, grid, t0):
     for s, e, p, a in events:
         i = nearest(s)
         su = int(positions[i])
-        eu = round((e - t0) / unit)
+        eu = int(np.rint(clock(e)))
         if i + 1 < len(starts):
             j = nearest(e, i + 1)
             if abs(starts[j] - e) < 0.12:
@@ -446,7 +590,8 @@ def build_score(voices, voice_set, bpm, beats, pickup, grid, sharps, system, tit
         part.insert(0, m21key.KeySignature(sharps))
         part.insert(0, meter.TimeSignature(f"{beats}/4"))
         if vi == 0:
-            part.insert(0, tempo.MetronomeMark(number=bpm))
+            # singers read a whole number; the exact timing is in the report's beat_seconds
+            part.insert(0, tempo.MetronomeMark(number=int(round(bpm))))
         for su, du, midi in vnotes:
             p = spell(midi, key_signature)
             n = note.Note(p)
@@ -529,6 +674,7 @@ def transcribe_score(a, temp_dir):
     ev = transcribe(source, a.onset, a.frame, a.min_ms, polyphonic=poly)
     ev = merge_fragments(ev, detect_onsets(source))
     ev = drop_slivers(ev)
+    ev = drop_silent(ev, audio)
     ensemble = a.ensemble if a.ensemble != "auto" else detect_ensemble(remove_harmonics(ev) if poly else ev)
     sets = ENSEMBLES[ensemble]
     if poly:
@@ -541,8 +687,14 @@ def transcribe_score(a, temp_dir):
         return None, 3
     ev.sort()
     t0 = ev[0][0]
-    bpm = a.bpm or estimate_bpm(source, ev, a.grid)
-    q = quantise(ev, bpm, a.grid, t0)
+    start_bpm = a.bpm or estimate_bpm(source, ev, a.grid)
+    starts = cluster_times([s for s, *_ in ev])
+    clock, tempo_model, steady_bpm, misfits = choose_clock(starts, start_bpm, a.grid)
+    q = quantise(ev, start_bpm, a.grid, t0, clock)
+    # the tempo written in the score: steady, or the average of a tracked tempo
+    span = starts[-1] - starts[0]
+    bpm = steady_bpm if tempo_model == "steady" or span <= 0 else \
+        round(60.0 * float(clock(starts[-1]) - clock(starts[0])) / a.grid / span, 1)
     n_voices = auto_voice_count(q) if voices_req == 0 else voices_req
     voice_set = sets[n_voices]
     voices = assign_voices(q, n_voices, voice_set, legato=a.grid * a.legato)
@@ -566,6 +718,14 @@ def transcribe_score(a, temp_dir):
         "time_signature": f"{beats}/4", "pickup_beats": pickup / a.grid, "system": a.system,
         "ensemble": ensemble, "separated": separated,
         "audio_event_span_seconds": max(end for _, end, _, _ in ev) - t0,
+        # where the music is in the recording: beat b of "notes" (b = 0 is the first
+        # note) starts at beat_seconds[b] seconds into the audio file
+        "first_note_seconds": round(float(t0), 3),
+        "start_bpm": start_bpm,
+        "tempo_model": tempo_model,
+        "grid_misfit": {"steady": round(misfits[0], 3), "tracked": round(misfits[1], 3)},
+        "beat_seconds": [round(float(s), 3) for s in clock.seconds(
+            np.arange(0, max(su + du for su, du, *_ in q) // a.grid + 2) * a.grid)],
         "notes": report,
     }
     return summary, 0
@@ -584,7 +744,8 @@ def parse_args(argv):
                     help="isolate vocals from instruments first (auto: when instruments are present and the model is available)")
     ap.add_argument("--legato", type=float, default=1.0,
                     help="close rests up to this many beats by holding the previous note (0 = off)")
-    ap.add_argument("--bpm", type=int, help="tempo (default: estimate)")
+    ap.add_argument("--bpm", type=float, help="starting tempo, may be fractional (default: estimate); "
+                    "later tempo changes are still followed")
     ap.add_argument("--time-sig", default="auto", help="e.g. 4/4, 3/4, or auto (default)")
     ap.add_argument("--pickup", type=float, default=0, help="pickup length in beats (with fixed --time-sig)")
     ap.add_argument("--key", type=int, help="key signature as sharps (+) / flats (-); default: estimate")
@@ -596,7 +757,7 @@ def parse_args(argv):
     ap.add_argument("--report", help="write a JSON summary here")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args(argv)
-    if a.bpm is not None and a.bpm <= 0:
+    if a.bpm is not None and not (math.isfinite(a.bpm) and a.bpm > 0):
         ap.error("--bpm must be positive")
     if a.key is not None and not -7 <= a.key <= 7:
         ap.error("--key must be between -7 and 7")

@@ -78,6 +78,60 @@ def check_timing_grid():
     assert notes[-1][0] + notes[-1][1] == max(notes[-1][0] + 1, round(events[-1][1] * 4))
 
 
+def tempo_clip(path, bpm_start, bpm_end, bars):
+    """A melody (half, quarter, quarter per bar) whose tempo moves linearly; returns the notes."""
+    import numpy as np
+    import soundfile as sf
+
+    scale = [62, 64, 66, 67, 69, 71, 73, 74]
+    notes = []
+    for b in range(bars):
+        notes += [(scale[b % 8], 2), (scale[(b + 2) % 8], 1), (scale[(b + 4) % 8], 1)]
+    total = sum(beats for _, beats in notes)
+    times, t = [], 0.0
+    for b in range(total + 1):
+        times.append(t)
+        t += 60 / (bpm_start + (bpm_end - bpm_start) * b / total)
+    sr, lead = make_test_clip.SR, 0.3
+    y = np.zeros(int(sr * (times[-1] + lead + 1)))
+    pos = 0
+    for i, (midi, beats) in enumerate(notes):
+        v = make_test_clip.voice(440 * 2 ** ((midi - 69) / 12), (times[pos + beats] - times[pos]) * 0.95, i)
+        s = int(sr * (times[pos] + lead))
+        y[s:s + len(v)] += v[:len(y) - s]
+        pos += beats
+    sf.write(path, 0.5 * y / np.abs(y).max(), sr)
+    return notes, times
+
+
+def check_tempo_tracking():
+    """Real performances are never at a whole BPM and drift; both must stay on the beat.
+    (A 0.5 BPM search rounded to whole BPM got 5 of 144 notes right at 78.4 BPM.)"""
+    from music21 import pitch
+
+    for name, start, end in (("steady 78.4", 78.4, 78.4), ("drift 76-80", 76, 80)):
+        with tempfile.TemporaryDirectory() as d:
+            wav = Path(d) / "tempo.wav"
+            notes, times = tempo_clip(wav, start, end, 48)  # about 150 s
+            rep = Path(d) / "r.json"
+            code = engine.main([str(wav), "-o", str(Path(d) / "o.musicxml"), "--report", str(rep),
+                                "--voices", "1", "--separate", "off", "-q"])
+            assert code == 0, f"{name}: engine exit {code}"
+            r = json.loads(rep.read_text())
+            got = {(n["beat"], pitch.Pitch(n["pitch"]).midi) for n in r["notes"]}
+            expected, pos = set(), 0
+            for midi, beats in notes:
+                expected.add((float(pos), midi))
+                pos += beats
+            matched = len(expected & got)
+            # the report maps beats back to the recording
+            late = max(abs(r["beat_seconds"][b] - (times[b] + 0.3)) for b in range(0, pos, 4))
+            print(f"{name}: bpm={r['bpm']} matched={matched}/{len(expected)} emitted={len(got)} "
+                  f"beat_seconds max error={late:.3f}s")
+            assert matched == len(expected) == len(got), name
+            assert late < 0.1, name
+
+
 def check_pickup_with_late_entrance():
     parts = engine.ENSEMBLES["mixed"][2]
     score, _ = engine.build_score(
@@ -155,4 +209,5 @@ if __name__ == "__main__":
     check_pickup_with_late_entrance()
     check("melody", 1)
     check("chorale", 4)
+    check_tempo_tracking()
     print("engine ok")

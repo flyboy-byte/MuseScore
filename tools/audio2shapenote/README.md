@@ -39,10 +39,10 @@ on PATH, or the `MUSESCORE_AUDIO_PYTHON` environment variable.
 | `io/audioImport/noteheadScheme` | `shape-7-aikin` | also `shape-7-funk`, `shape-7-walker`, `shape-4`, `normal` |
 | `io/audioImport/voices` | `0` | parts to write, 1–4; 0 = detect |
 | `io/audioImport/timeSignature` | `auto` | or e.g. `3/4` |
-| `io/audioImport/tempo` | `0` | BPM; 0 = detect |
+| `io/audioImport/tempo` | `0` | starting BPM, whole numbers only here (the command line takes fractions); 0 = detect |
 | `io/audioImport/pythonExecutable` | empty | Python to use; empty = auto |
 | `io/audioImport/enginePath` | empty | this script; empty = bundled copy (or `MUSESCORE_AUDIO2SHAPENOTE`) |
-| `io/audioImport/timeoutSeconds` | `600` | give up after this long |
+| `io/audioImport/timeoutSeconds` | `1800` | give up after this long |
 
 The command line also works: `mscore -o song.mscz song.wav`.
 
@@ -56,8 +56,14 @@ The command line also works: `mscore -o song.mscz song.wav`.
 Options: `--system aikin|funk|walker|4shape`, `--voices 0-4`, `--ensemble auto|mixed|male`,
 `--separate auto|on|off`, `--legato BEATS`, `--time-sig auto|N/4`,
 `--pickup BEATS` (with a fixed time signature), `--key SHARPS` (negative = flats),
-`--bpm`, `--grid 1|2|4` (notes per beat), `--onset/--frame` (model sensitivity),
-`--report out.json` (summary with every note and its shape).
+`--bpm` (starting tempo, may be fractional), `--grid 1|2|4` (notes per beat),
+`--onset/--frame` (model sensitivity), `--report out.json` (summary with every note
+and its shape).
+
+The report also says where the music is in the recording: `beat_seconds[b]` is the
+time in the audio file of beat `b` (the beats in `notes`, where beat 0 is the first
+note), and `tempo_model` says whether one steady tempo was used or a tempo that
+follows the performance.
 
 ## Match a transcription to an existing score
 
@@ -87,10 +93,14 @@ matching part names.
 1. **Notes**: Spotify Basic Pitch (bundled ONNX model, no TensorFlow).
 2. **Clean-up**: same-pitch fragments caused by vibrato or reverb are joined unless
    a real onset is there (audio onset detector, or another part moving to a new
-   pitch); overtone ghosts are dropped.
-3. **Rhythm**: tempo from librosa refined by fitting onsets to the grid. Both
-   estimated and manual tempo use one recording clock, so rounding one onset
-   cannot shift later measures. This uses a single tempo for the piece.
+   pitch); overtone ghosts are dropped, and so are notes where the original recording
+   is silent (vocal isolation leaves a faint noise floor there).
+3. **Rhythm**: the opening tempo comes from librosa, refined by fitting the first
+   20 seconds of onsets to the grid. A fine search over the whole piece then finds
+   the best steady tempo (any value, not only whole BPM). If the performance speeds
+   up or slows down so that a steady grid fits poorly, a tempo that follows the
+   onsets is used instead. Every onset is rounded against that one clock, so rounding
+   cannot accumulate. The score shows the tempo as a whole number.
 4. **Parts**: the group is detected as **mixed** (Treble/Alto/Tenor/Bass, shape-note
    order) or **male** (Tenor/Lead/Baritone/Bass, gospel/bluegrass quartet) from its
    pitch range. Notes starting together are matched to parts by voice-leading distance
@@ -107,21 +117,24 @@ matching part names.
 
 ```
 .venv/bin/python test_shapes.py   # shape logic, no audio
-.venv/bin/python test_engine.py   # synthesizes clips with known answers, must be exact
+.venv/bin/python test_engine.py   # synthesizes clips with known answers, must be exact (~2 min)
 ```
 
 `make_test_clip.py melody|chorale out.wav` writes the test audio and a `.truth.json`.
+`test_engine.py` also renders two 150-second melodies, one at a steady 78.4 BPM and
+one drifting from 76 to 80 BPM; every note must land on the right beat.
 
-To run a timing regression against a recording you already have:
+To check a recording you already have:
 
 ```sh
 .venv/bin/python test_engine.py --audio recording.mp3 --tolerance 2
 ```
 
 This runs transcription on the mix and checks the span from the first to the last
-detected note against the duration of the score at its reported tempo. It measures
-timing drift, not pitch or voice accuracy. The audio is read locally and does not
-need to be checked into the repository.
+detected note against the duration of the score at its reported tempo. Both come
+from the same tempo, so this only catches rounding that accumulates; it cannot tell
+whether the tempo or the bar lines are right, and it measures nothing about pitch or
+parts. The audio is read locally and does not need to be checked into the repository.
 
 ## Accuracy so far
 
@@ -130,6 +143,11 @@ need to be checked into the repository.
 | Synthetic melody (vibrato) | 100% | 100% | all right |
 | Synthetic 4-part chorale, 3/4 with pickup | 100% | 100% | all right |
 | Same chorale + reverb, noise, ±3% tempo drift, low-pass | 59% | 34% | meter right, pickup missed |
+| Synthetic 150 s melodies at 63.7, 78.4, 91.25 BPM; 78.4 with 25 ms timing jitter; 76→80 BPM drift (2026-11-26) | 100% | 100% | all right |
+| Same melody at a steady 117.3 BPM | — | 7% | written in half time (58.65 BPM); see Known limits |
+
+Before 2026-11-26 the tempo search used 0.5 BPM steps rounded to whole BPM, and only
+the whole-number tempo in the rows above came out right (2–14% of notes otherwise).
 
 | Doyle Lawson & Quicksilver, "Passed All Sorrow" (real men's quartet, 2:38) | not measurable (no reference score) | readable quartet layout; before: mixed-choir staves full of 16ths |
 
@@ -178,5 +196,10 @@ inner-voice assignments, and bar lines before relying on the shape-note draft.
 
 - Four parts at most; parts are assigned by range and voice leading, so crossing
   parts can be swapped.
-- No lyrics, dynamics, repeats, tempo or meter changes, triplets, or compound meters (6/8).
+- No lyrics, dynamics, repeats, written tempo or meter changes, triplets, or compound meters (6/8).
+- Gradual tempo changes are followed, but not sudden ones (a fermata or a held
+  ending adds beats instead of stretching one).
+- Half time and double time can be confused: a steady 117 BPM melody came out at
+  58.65 BPM. The notes are then written at half their length (quarters as eighths);
+  set `--bpm` when that happens.
 - Long recordings are slow on CPU (Basic Pitch runs at about real time or faster).
